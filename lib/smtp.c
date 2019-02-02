@@ -1080,19 +1080,20 @@ static CURLcode smtp_multi_statemach(struct connectdata *conn, bool *done)
       return result;
   }
 
-  result = Curl_pp_statemach(&smtpc->pp, FALSE);
+  result = Curl_pp_statemach(&smtpc->pp, FALSE, FALSE);
   *done = (smtpc->state == SMTP_STOP) ? TRUE : FALSE;
 
   return result;
 }
 
-static CURLcode smtp_block_statemach(struct connectdata *conn)
+static CURLcode smtp_block_statemach(struct connectdata *conn,
+                                     bool disconnecting)
 {
   CURLcode result = CURLE_OK;
   struct smtp_conn *smtpc = &conn->proto.smtpc;
 
   while(smtpc->state != SMTP_STOP && !result)
-    result = Curl_pp_statemach(&smtpc->pp, TRUE);
+    result = Curl_pp_statemach(&smtpc->pp, TRUE, disconnecting);
 
   return result;
 }
@@ -1253,7 +1254,7 @@ static CURLcode smtp_done(struct connectdata *conn, CURLcode status,
        the smtp_multi_statemach function but we have no general support for
        non-blocking DONE operations!
     */
-    result = smtp_block_statemach(conn);
+    result = smtp_block_statemach(conn, FALSE);
   }
 
   /* Clear the transfer mode for the next request */
@@ -1360,7 +1361,7 @@ static CURLcode smtp_disconnect(struct connectdata *conn, bool dead_connection)
      point! */
   if(!dead_connection && smtpc->pp.conn && smtpc->pp.conn->bits.protoconnstart)
     if(!smtp_perform_quit(conn))
-      (void)smtp_block_statemach(conn); /* ignore errors on QUIT */
+      (void)smtp_block_statemach(conn, TRUE); /* ignore errors on QUIT */
 
   /* Disconnect from the server */
   Curl_pp_disconnect(&smtpc->pp);
@@ -1441,7 +1442,6 @@ static CURLcode smtp_regular_transfer(struct connectdata *conn,
 
 static CURLcode smtp_setup_connection(struct connectdata *conn)
 {
-  struct Curl_easy *data = conn->data;
   CURLcode result;
 
   /* Clear the TLS upgraded flag */
@@ -1451,8 +1451,6 @@ static CURLcode smtp_setup_connection(struct connectdata *conn)
   result = smtp_init(conn);
   if(result)
     return result;
-
-  data->state.path++;   /* don't include the initial slash */
 
   return CURLE_OK;
 }
@@ -1507,7 +1505,7 @@ static CURLcode smtp_parse_url_path(struct connectdata *conn)
   /* The SMTP struct is already initialised in smtp_connect() */
   struct Curl_easy *data = conn->data;
   struct smtp_conn *smtpc = &conn->proto.smtpc;
-  const char *path = data->state.path;
+  const char *path = &data->state.up.path[1]; /* skip leading path */
   char localhost[HOSTNAME_MAX + 1];
 
   /* Calculate the path if necessary */
@@ -1563,14 +1561,14 @@ CURLcode Curl_smtp_escape_eob(struct connectdata *conn, const ssize_t nread)
   if(!scratch || data->set.crlf) {
     oldscratch = scratch;
 
-    scratch = newscratch = malloc(2 * UPLOAD_BUFSIZE);
+    scratch = newscratch = malloc(2 * data->set.upload_buffer_size);
     if(!newscratch) {
       failf(data, "Failed to alloc scratch buffer!");
 
       return CURLE_OUT_OF_MEMORY;
     }
   }
-  DEBUGASSERT(UPLOAD_BUFSIZE >= nread);
+  DEBUGASSERT(data->set.upload_buffer_size >= (size_t)nread);
 
   /* Have we already sent part of the EOB? */
   eob_sent = smtp->eob;

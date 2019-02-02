@@ -175,6 +175,9 @@ CURLcode Curl_output_ntlm(struct connectdata *conn, bool proxy)
     if(s_hSecDll == NULL)
       return err;
   }
+#ifdef SECPKG_ATTR_ENDPOINT_BINDINGS
+  ntlm->sslContext = conn->sslContext;
+#endif
 #endif
 
   switch(ntlm->state) {
@@ -228,7 +231,7 @@ CURLcode Curl_output_ntlm(struct connectdata *conn, bool proxy)
     /* connection is already authenticated,
      * don't send a header in future requests */
     ntlm->state = NTLMSTATE_LAST;
-    /* fall-through */
+    /* FALLTHROUGH */
   case NTLMSTATE_LAST:
     Curl_safefree(*allocuserpwd);
     authp->done = TRUE;

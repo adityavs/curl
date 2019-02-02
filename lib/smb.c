@@ -367,7 +367,7 @@ static CURLcode smb_send(struct connectdata *conn, ssize_t len,
   ssize_t bytes_written;
   CURLcode result;
 
-  result = Curl_write(conn, FIRSTSOCKET, conn->data->state.uploadbuffer,
+  result = Curl_write(conn, FIRSTSOCKET, conn->data->state.ulbuf,
                       len, &bytes_written);
   if(result)
     return result;
@@ -393,7 +393,7 @@ static CURLcode smb_flush(struct connectdata *conn)
     return CURLE_OK;
 
   result = Curl_write(conn, FIRSTSOCKET,
-                      conn->data->state.uploadbuffer + smbc->sent,
+                      conn->data->state.ulbuf + smbc->sent,
                       len, &bytes_written);
   if(result)
     return result;
@@ -409,9 +409,12 @@ static CURLcode smb_flush(struct connectdata *conn)
 static CURLcode smb_send_message(struct connectdata *conn, unsigned char cmd,
                                  const void *msg, size_t msg_len)
 {
-  smb_format_message(conn, (struct smb_header *)conn->data->state.uploadbuffer,
+  CURLcode result = Curl_get_upload_buffer(conn->data);
+  if(result)
+    return result;
+  smb_format_message(conn, (struct smb_header *)conn->data->state.ulbuf,
                      cmd, msg_len);
-  memcpy(conn->data->state.uploadbuffer + sizeof(struct smb_header),
+  memcpy(conn->data->state.ulbuf + sizeof(struct smb_header),
          msg, msg_len);
 
   return smb_send(conn, sizeof(struct smb_header) + msg_len, 0);
@@ -572,11 +575,15 @@ static CURLcode smb_send_read(struct connectdata *conn)
 
 static CURLcode smb_send_write(struct connectdata *conn)
 {
-  struct smb_write *msg = (struct smb_write *)conn->data->state.uploadbuffer;
+  struct smb_write *msg;
   struct smb_request *req = conn->data->req.protop;
   curl_off_t offset = conn->data->req.offset;
-
   curl_off_t upload_size = conn->data->req.size - conn->data->req.bytecount;
+  CURLcode result = Curl_get_upload_buffer(conn->data);
+  if(result)
+    return result;
+  msg = (struct smb_write *)conn->data->state.ulbuf;
+
   if(upload_size >= MAX_PAYLOAD_SIZE - 1) /* There is one byte of padding */
     upload_size = MAX_PAYLOAD_SIZE - 1;
 
@@ -603,9 +610,10 @@ static CURLcode smb_send_and_recv(struct connectdata *conn, void **msg)
 
   /* Check if there is data in the transfer buffer */
   if(!smbc->send_size && smbc->upload_size) {
-    int nread = smbc->upload_size > UPLOAD_BUFSIZE ? UPLOAD_BUFSIZE :
-      (int) smbc->upload_size;
-    conn->data->req.upload_fromhere = conn->data->state.uploadbuffer;
+    size_t nread = smbc->upload_size > conn->data->set.upload_buffer_size ?
+      conn->data->set.upload_buffer_size :
+      smbc->upload_size;
+    conn->data->req.upload_fromhere = conn->data->state.ulbuf;
     result = Curl_fillreadbuffer(conn, nread, &nread);
     if(result && result != CURLE_AGAIN)
       return result;
@@ -939,15 +947,10 @@ static int smb_getsock(struct connectdata *conn, curl_socket_t *socks,
 static CURLcode smb_do(struct connectdata *conn, bool *done)
 {
   struct smb_conn *smbc = &conn->proto.smbc;
-  struct smb_request *req = conn->data->req.protop;
 
   *done = FALSE;
   if(smbc->share) {
-    req->path = strchr(smbc->share, '\0');
-    if(req->path) {
-      req->path++;
-      return CURLE_OK;
-    }
+    return CURLE_OK;
   }
   return CURLE_URL_MALFORMAT;
 }
@@ -956,12 +959,13 @@ static CURLcode smb_parse_url_path(struct connectdata *conn)
 {
   CURLcode result = CURLE_OK;
   struct Curl_easy *data = conn->data;
+  struct smb_request *req = data->req.protop;
   struct smb_conn *smbc = &conn->proto.smbc;
   char *path;
   char *slash;
 
   /* URL decode the path */
-  result = Curl_urldecode(data, data->state.path, 0, &path, NULL, TRUE);
+  result = Curl_urldecode(data, data->state.up.path, 0, &path, NULL, TRUE);
   if(result)
     return result;
 
@@ -984,6 +988,7 @@ static CURLcode smb_parse_url_path(struct connectdata *conn)
   /* Parse the path for the file path converting any forward slashes into
      backslashes */
   *slash++ = 0;
+  req->path = slash;
 
   for(; *slash; slash++) {
     if(*slash == '/')
